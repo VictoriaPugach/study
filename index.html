@@ -1,3 +1,174 @@
 <!DOCTYPE html>
+<html lang="ru">
+<head>
 <meta charset="utf-8">
-<h1>Привет, это сайт</h1>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Что на фото? — нейросеть в браузере</title>
+<style>
+  :root { --bg:#0f1115; --card:#181c23; --line:#2a303a; --text:#e8eaed; --dim:#9aa3af; --acc:#5b9cff; }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--text);
+         font:16px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif; }
+  .wrap { max-width:760px; margin:0 auto; padding:24px 16px 60px; }
+  h1 { font-size:28px; margin:0 0 6px; }
+  .sub { color:var(--dim); margin:0 0 24px; }
+  .card { background:var(--card); border:1px solid var(--line); border-radius:14px;
+          padding:18px; margin-bottom:16px; }
+  .row { display:flex; gap:16px; flex-wrap:wrap; align-items:center; }
+  button, label.btn { background:var(--acc); color:#fff; border:0; border-radius:10px;
+          padding:11px 18px; font-size:15px; cursor:pointer; display:inline-block; }
+  button.ghost { background:transparent; color:var(--text); border:1px solid var(--line); }
+  input[type=file] { display:none; }
+  .examples { display:flex; gap:8px; flex-wrap:wrap; margin-top:12px; }
+  .examples img { width:56px; height:56px; border-radius:8px; cursor:pointer;
+          background:#000; border:2px solid transparent; image-rendering:pixelated; }
+  .examples img:hover { border-color:var(--acc); }
+  .preview { display:flex; gap:18px; align-items:center; flex-wrap:wrap; }
+  .preview canvas { width:140px; height:140px; image-rendering:pixelated;
+          border-radius:10px; border:1px solid var(--line); background:#000; }
+  .cap { color:var(--dim); font-size:13px; }
+  .bar { margin:9px 0; }
+  .bar .lab { display:flex; justify-content:space-between; font-size:14px; margin-bottom:4px; }
+  .bar .track { height:9px; background:#242a33; border-radius:5px; overflow:hidden; }
+  .bar .fill { height:100%; background:var(--acc); border-radius:5px; transition:width .25s; }
+  .bar.top .fill { background:#43d17c; }
+  .answer { font-size:22px; font-weight:700; margin:0 0 14px; }
+  .note { color:var(--dim); font-size:14px; }
+  .switch { display:flex; align-items:center; gap:8px; color:var(--dim); font-size:14px;
+          cursor:pointer; user-select:none; }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <h1>Что на фото?</h1>
+  <p class="sub">Нейросеть, обученная на 60 000 картинок одежды.
+     Считает прямо в твоём браузере — никакого сервера.</p>
+
+  <div class="card">
+    <div class="row">
+      <label class="btn" for="file">Загрузить фото</label>
+      <input type="file" id="file" accept="image/*">
+      <label class="switch"><input type="checkbox" id="invert"> инвертировать цвета</label>
+    </div>
+    <div class="examples" id="examples"></div>
+    <p class="note" id="hint">Нажми на пример или загрузи своё фото.</p>
+  </div>
+
+  <div class="card" id="result" style="display:none">
+    <div class="preview">
+      <div>
+        <canvas id="canvas" width="28" height="28"></canvas>
+        <div class="cap">так это видит сеть<br>28 × 28, серый</div>
+      </div>
+      <div style="flex:1; min-width:260px">
+        <p class="answer" id="answer"></p>
+        <div id="bars"></div>
+      </div>
+    </div>
+  </div>
+
+  <p class="note">Сеть училась на белых вещах на чёрном фоне. Обычная фотография
+  выглядит наоборот — поэтому есть галочка «инвертировать». Попробуй с ней и без неё:
+  ответ меняется. Картинку надо готовить ровно так же, как её готовили при обучении.</p>
+
+</div>
+
+<script>
+let model = null;
+
+// ---- сама нейросеть: умножить и сложить, ровно как в Colab ----
+function forward(x, model) {
+  let a = x;
+  for (const L of model.layers) {
+    const W = L.W, b = L.b, out = new Float64Array(b.length);
+    for (let j = 0; j < b.length; j++) out[j] = b[j];
+    for (let i = 0; i < a.length; i++) {
+      const ai = a[i];
+      if (ai === 0) continue;              // 0 ничего не добавит, пропускаем
+      const row = W[i];
+      for (let j = 0; j < out.length; j++) out[j] += ai * row[j];
+    }
+    if (L.activation === 'relu') {
+      for (let j = 0; j < out.length; j++) if (out[j] < 0) out[j] = 0;
+    }
+    if (L.activation === 'softmax') {
+      let m = -Infinity, s = 0;
+      for (let j = 0; j < out.length; j++) if (out[j] > m) m = out[j];
+      for (let j = 0; j < out.length; j++) { out[j] = Math.exp(out[j] - m); s += out[j]; }
+      for (let j = 0; j < out.length; j++) out[j] /= s;
+    }
+    a = out;
+  }
+  return a;
+}
+
+// ---- подготовка картинки: то же самое, что делали с данными при обучении ----
+function toPixels(img) {
+  const c = document.getElementById('canvas'), ctx = c.getContext('2d', { willReadFrequently: true });
+  ctx.fillStyle = '#000';
+  ctx.fillRect(0, 0, 28, 28);
+  ctx.drawImage(img, 0, 0, 28, 28);                 // размер 28 на 28, как при обучении
+  const d = ctx.getImageData(0, 0, 28, 28).data;
+  const inv = document.getElementById('invert').checked;
+  const x = new Float64Array(784);
+  for (let i = 0; i < 784; i++) {
+    let g = (d[i*4] + d[i*4+1] + d[i*4+2]) / 3;     // в оттенки серого
+    if (inv) g = 255 - g;                           // фон должен быть чёрным
+    x[i] = g / 255;                                 // деление на 255, как в Colab
+  }
+  ctx.putImageData(new ImageData(
+    Uint8ClampedArray.from({length: 784*4}, (_, k) => {
+      const v = x[k >> 2] * 255;
+      return (k % 4 === 3) ? 255 : v;
+    }), 28, 28), 0, 0);
+  return x;
+}
+
+function show(probs) {
+  const pairs = model.classes.map((n, i) => [n, probs[i]]).sort((a, b) => b[1] - a[1]);
+  document.getElementById('answer').textContent =
+    'Это ' + pairs[0][0] + ' — ' + Math.round(pairs[0][1] * 100) + ' %';
+  document.getElementById('bars').innerHTML = pairs.slice(0, 3).map((p, k) => `
+    <div class="bar ${k === 0 ? 'top' : ''}">
+      <div class="lab"><span>${p[0]}</span><span>${(p[1] * 100).toFixed(1)} %</span></div>
+      <div class="track"><div class="fill" style="width:${p[1] * 100}%"></div></div>
+    </div>`).join('');
+  document.getElementById('result').style.display = 'block';
+}
+
+let последняя = null;
+function predict(img) {
+  последняя = img;
+  show(forward(toPixels(img), model));
+}
+
+function загрузить(src) {
+  const img = new Image();
+  img.onload = () => predict(img);
+  img.src = src;
+}
+
+document.getElementById('file').onchange = e => {
+  const f = e.target.files[0];
+  if (!f) return;
+  const r = new FileReader();
+  r.onload = () => загрузить(r.result);
+  r.readAsDataURL(f);
+};
+document.getElementById('invert').onchange = () => { if (последняя) predict(последняя); };
+
+// ---- старт: грузим один файл model.json, в нём и весы, и примеры ----
+fetch('model.json').then(r => r.json()).then(m => {
+  model = m;
+  document.getElementById('hint').textContent =
+    'Модель загружена. Нажми на пример или загрузи своё фото.';
+  document.getElementById('examples').innerHTML =
+    m.examples.map(e => `<img src="${e.png}" title="${e.label}" alt="${e.label}">`).join('');
+  document.querySelectorAll('#examples img').forEach(el => {
+    el.onclick = () => { document.getElementById('invert').checked = false; загрузить(el.src); };
+  });
+});
+</script>
+</body>
+</html>
